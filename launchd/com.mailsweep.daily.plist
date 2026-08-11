@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mailsweep.daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Point this at your own `mailsweep` install, e.g. `which mailsweep` -->
+        <string>/usr/local/bin/mailsweep</string>
+        <string>scan</string>
+    </array>
+
+    <!-- 7:30 every morning -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>7</integer>
+        <key>Minute</key><integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/mailsweep.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/mailsweep.err</string>
+</dict>
+</plist>

@@ -1,0 +1,23 @@
+[project]
+name = "mailsweep"
+version = "0.3.0"
+description = "Local mail triage: surface buried events, queue unsubscribes, audit spam false positives, draft purchase reviews from order mail, quantify inbox noise. Apple Mail + Calendar + Ollama."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.scripts]
+mailsweep = "mailsweep.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mailsweep*"]
+
+[tool.setuptools.package-data]
+mailsweep = ["jxa/*.js"]

@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailSweep — a local mail-triage case study</title>
+<meta name="description" content="How a rules-plus-local-LLM triage tool cleared 28,000+ marketing messages, rescued real alerts from spam, and closed an old forwarding leak — without a single message leaving the machine.">
+<style>
+  :root{
+    --paper: #dfd9c8;
+    --paper-deep: #cbc2a8;
+    --paper-line: #b7ac8d;
+    --ink: #211e19;
+    --ink-soft: #4d473b;
+    --stamp: #b23a1e;
+    --air: #2e4868;
+    --safe: #4b6b4e;
+    --flag: #9c6b24;
+    --shadow: rgba(33,30,25,.14);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper: #18140f;
+      --paper-deep: #221c15;
+      --paper-line: #423a2c;
+      --ink: #e9e1cd;
+      --ink-soft: #b8ae95;
+      --stamp: #d3572e;
+      --air: #7b9bc0;
+      --safe: #7fae83;
+      --flag: #d0973e;
+      --shadow: rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper: #18140f; --paper-deep: #221c15; --paper-line: #423a2c;
+    --ink: #e9e1cd; --ink-soft: #b8ae95;
+    --stamp: #d3572e; --air: #7b9bc0; --safe: #7fae83; --flag: #d0973e;
+    --shadow: rgba(0,0,0,.4);
+  }
+  :root[data-theme="light"]{
+    --paper: #dfd9c8; --paper-deep: #cbc2a8; --paper-line: #b7ac8d;
+    --ink: #211e19; --ink-soft: #4d473b;
+    --stamp: #b23a1e; --air: #2e4868; --safe: #4b6b4e; --flag: #9c6b24;
+    --shadow: rgba(33,30,25,.14);
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family: Charter, Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    font-size:17px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--stamp);color:var(--paper)}
+
+  .page{max-width:760px;margin:0 auto;padding:3.2rem 1.5rem 5rem}
+
+  .display{
+    font-family: Rockwell, "Roboto Slab", "Sitka Small", ui-serif, serif;
+    font-weight:700;
+    letter-spacing:.01em;
+    text-wrap:balance;
+  }
+
+  /* ---------- masthead ---------- */
+  .masthead{
+    display:flex; align-items:center; gap:1.6rem;
+    padding-bottom:1.8rem; margin-bottom:2rem;
+    border-bottom:3px double var(--paper-line);
+  }
+  .stamp{
+    flex:0 0 auto; width:92px; height:92px;
+  }
+  .masthead-text h1{
+    font-size:2.1rem; margin:0 0 .25rem; color:var(--ink);
+  }
+  .masthead-text p{
+    margin:0; color:var(--ink-soft); font-size:.98rem; max-width:46ch;
+  }
+  .kicker{
+    display:block; font-family: "SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.72rem; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--stamp); margin-bottom:.5rem;
+  }
+
+  h2.section{
+    font-size:1.5rem; margin:3.2rem 0 1rem;
+    display:flex; align-items:baseline; gap:.75rem;
+  }
+  h2.section .tag{
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.68rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--ink-soft); border:1px solid var(--paper-line);
+    padding:.2rem .5rem; border-radius:3px; white-space:nowrap;
+  }
+  p{max-width:66ch}
+  .lede{font-size:1.12rem; color:var(--ink-soft)}
+
+  a{color:var(--air); text-decoration-thickness:1px; text-underline-offset:2px}
+  a:focus-visible, button:focus-visible, summary:focus-visible{
+    outline:2px solid var(--stamp); outline-offset:2px;
+  }
+
+  /* ---------- pillars ---------- */
+  .pillars{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:1px; background:var(--paper-line);
+    border:1px solid var(--paper-line); margin:1.5rem 0;
+  }
+  .pillar{background:var(--paper); padding:1.1rem 1.2rem}
+  .pillar .n{
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.72rem; color:var(--stamp); letter-spacing:.08em;
+  }
+  .pillar h3{margin:.35rem 0 .3rem; font-size:1.02rem}
+  .pillar p{margin:0; font-size:.92rem; color:var(--ink-soft); max-width:none}
+
+  /* ---------- manifest / stats table ---------- */
+  .manifest{
+    width:100%; border-collapse:collapse; margin:1.4rem 0 .4rem;
+    font-size:.95rem;
+  }
+  .manifest caption{
+    text-align:left; font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.68rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--ink-soft); margin-bottom:.5rem;
+  }
+  .manifest th, .manifest td{
+    text-align:left; padding:.55rem .7rem; border-bottom:1px solid var(--paper-line);
+  }
+  .manifest thead th{
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.68rem; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink-soft); font-weight:600; border-bottom:2px solid var(--ink-soft);
+  }
+  .manifest td.num, .manifest th.num{
+    text-align:right; font-variant-numeric:tabular-nums;
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+  }
+  .manifest tr:last-child td{border-bottom:2px solid var(--ink-soft); font-weight:700}
+  .table-wrap{overflow-x:auto}
+
+  .stat-row{
+    display:flex; flex-wrap:wrap; gap:1.6rem; margin:1.6rem 0 2.2rem;
+  }
+  .stat{min-width:130px}
+  .stat .v{
+    font-family: Rockwell, "Roboto Slab", ui-serif, serif;
+    font-size:2.1rem; font-weight:700; color:var(--stamp);
+    font-variant-numeric:tabular-nums; line-height:1;
+  }
+  .stat .l{font-size:.78rem; color:var(--ink-soft); margin-top:.3rem}
+
+  /* ---------- pill / chip ---------- */
+  .chip{
+    display:inline-flex; align-items:center; gap:.35rem;
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.72rem; letter-spacing:.03em;
+    padding:.18rem .55rem; border-radius:999px;
+    border:1px solid currentColor;
+  }
+  .chip.safe{color:var(--safe)}
+  .chip.flag{color:var(--flag)}
+  .chip.stamp{color:var(--stamp)}
+
+  /* ---------- field notes ---------- */
+  .fieldnote{
+    background:var(--paper-deep);
+    border:1px solid var(--paper-line);
+    border-left:4px solid var(--air);
+    padding:1.1rem 1.3rem; margin:1.3rem 0;
+    box-shadow:2px 3px 0 var(--shadow);
+  }
+  .fieldnote .head{
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.72rem; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--air); margin-bottom:.5rem; display:flex; gap:.6rem; align-items:baseline;
+  }
+  .fieldnote p{margin:.4rem 0; font-size:.96rem}
+  .fieldnote p:first-of-type{margin-top:0}
+  .fieldnote code{
+    font-family:"SF Mono", Menlo, ui-monospace, monospace;
+    font-size:.86em; background:var(--paper); padding:.05rem .3rem; border-radius:3px;
+    border:1px solid var(--paper-line);
+  }
+
+  /* ---------- safety callout ---------- */
+  .safety{
+    border:2px solid var(--safe); border-radius:2px;
+    padding:1.2rem 1.4rem; margin:1.6rem 0; position:relative;
+  }
+  .safety .head{
+    font-family: Rockwell, "Roboto Slab", ui-serif, serif;
+    font-weight:700; color:var(--safe); font-size:1.05rem; margin:0 0 .6rem;
+  }
+  .safety ul{margin:0; padding-left:1.2rem}
+  .safety li{margin:.35rem 0; font-size:.96rem}
+
+  pre{
+    background:var(--paper-deep); border:1px solid var(--paper-line);
+    padding:.9rem 1rem; overflow-x:auto; font-size:.86rem;
+    font-family:"SF Mono", Menlo, ui-monospace, monospace; line-height:1.55;
+    border-radius:2px;
+  }
+  code{font-family:"SF Mono", Menlo, ui-monospace, monospace}
+
+  footer{
+    margin-top:3.5rem; padding-top:1.4rem; border-top:1px solid var(--paper-line);
+    font-size:.85rem; color:var(--ink-soft);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:.5rem;
+  }
+
+  @media (max-width:520px){
+    .masthead{flex-direction:column; align-items:flex-start; gap:1rem}
+    .stat-row{gap:1.2rem}
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <header class="masthead">
+    <svg class="stamp" viewBox="0 0 100 100" role="img" aria-label="MailSweep postmark stamp">
+      <circle cx="50" cy="50" r="46" fill="none" stroke="var(--stamp)" stroke-width="2.5"/>
+      <circle cx="50" cy="50" r="38" fill="none" stroke="var(--stamp)" stroke-width="1.2"/>
+      <path id="arcTop" d="M 14 50 A 36 36 0 0 1 86 50" fill="none"/>
+      <path id="arcBot" d="M 18 58 A 32 32 0 0 0 82 58" fill="none"/>
+      <text font-family="Rockwell, 'Roboto Slab', serif" font-size="10.5" font-weight="700" fill="var(--stamp)" letter-spacing="2.5">
+        <textPath href="#arcTop" startOffset="50%" text-anchor="middle">MAILSWEEP</textPath>
+      </text>
+      <text font-family="'SF Mono', Menlo, monospace" font-size="7" fill="var(--stamp)" letter-spacing="1.5">
+        <textPath href="#arcBot" startOffset="50%" text-anchor="middle">SORTED · LOCAL</textPath>
+      </text>
+      <line x1="30" y1="50" x2="70" y2="50" stroke="var(--stamp)" stroke-width="1"/>
+    </svg>
+    <div class="masthead-text">
+      <span class="kicker">Case study · local mail triage</span>
+      <h1 class="display">Clearing the backlog without shipping it anywhere</h1>
+      <p>A small rules-plus-local-LLM tool, built to fix one overloaded set of inboxes — published here de-identified, in case the approach is useful to someone else's.</p>
+    </div>
+  </header>
+
+  <p class="lede">This started as a request to unsubscribe from a pile of marketing email. It ended as a standing tool: something that classifies mail, catches buried events, questions its own spam filter, and never once sends, deletes, or posts anything without a person looking at it first.</p>
+
+  <h2 class="section">The problem <span class="tag">before</span></h2>
+  <p>Seven personal and work mailboxes, years deep in unread marketing mail, an old auto-forwarding rule quietly duplicating messages across two of them, and — the part that actually mattered — real bank, pharmacy, and billing alerts sitting unread in a Junk folder next to the newsletters, because a spam filter can't tell "unfamiliar sender" from "important."</p>
+
+  <h2 class="section">The approach <span class="tag">how</span></h2>
+  <p>Cheap header rules do the first pass — <code>List-Unsubscribe</code>, sender patterns, receipt-shaped subject lines — because most mail sorts itself instantly and for free. Anything the rules can't place, or that smells like it might contain a real event, goes to a small model running entirely on the machine. Nothing about the content of a message ever leaves it.</p>
+
+  <div class="pillars">
+    <div class="pillar">
+      <span class="n">01</span>
+      <h3>Unsubscribe queue</h3>
+      <p>Ranks senders by real mailing-list signals, not guesswork. One-click (RFC&nbsp;8058) where the sender supports it, a browser tab where they don't. Fires only after a person approves that specific sender.</p>
+    </div>
+    <div class="pillar">
+      <span class="n">02</span>
+      <h3>Buried events</h3>
+      <p>Reads for invitations, deadlines, and appointments hiding inside ordinary mail, cross-checks them against the calendar so nothing gets re-suggested, and waits for a yes before writing anything.</p>
+    </div>
+    <div class="pillar">
+      <span class="n">03</span>
+      <h3>Spam audit</h3>
+      <p>Added mid-project, after a manual check turned up real financial alerts in the spam folder. Now runs daily: flags receipt- and security-shaped mail sitting in Junk, with a phishing hint for spoofed senders — never moves anything without approval.</p>
+    </div>
+    <div class="pillar">
+      <span class="n">04</span>
+      <h3>Daily digest</h3>
+      <p>One page each morning: what's pending, what's noisiest, what needs a look. The whole reason the other three don't require remembering to check anything.</p>
+    </div>
+  </div>
+
+  <h2 class="section">What it moved <span class="tag">results</span></h2>
+  <p>Numbers only — no senders, no account names, no message content. Rounded where exactness would only be interesting to the mailbox owner.</p>
+
+  <div class="stat-row">
+    <div class="stat"><div class="v">28,100+</div><div class="l">marketing messages cleared across 7 accounts</div></div>
+    <div class="stat"><div class="v">82</div><div class="l">senders actually unsubscribed</div></div>
+    <div class="stat"><div class="v">21</div><div class="l">buried events added to a calendar</div></div>
+    <div class="stat"><div class="v">45</div><div class="l">real alerts rescued out of spam</div></div>
+  </div>
+
+  <div class="table-wrap">
+  <table class="manifest">
+    <caption>Spam-audit pass, by run</caption>
+    <thead>
+      <tr><th>Pass</th><th class="num">Scanned</th><th class="num">Flagged</th><th class="num">Rescued</th><th>Notable</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Manual, one account</td><td class="num">436</td><td class="num">62</td><td class="num">41</td><td><span class="chip flag">2 confirmed phishing, left in place</span></td></tr>
+      <tr><td>First automated run</td><td class="num">245</td><td class="num">5</td><td class="num">4</td><td><span class="chip flag">1 confirmed phishing, left in place</span></td></tr>
+      <tr><td>Total to date</td><td class="num">681</td><td class="num">67</td><td class="num">45</td><td><span class="chip safe">0 false rescues</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="section">Field notes <span class="tag">what broke, and why it's useful</span></h2>
+  <p>The two bugs below cost the most time and are the most likely to bite anyone else scripting Apple Mail — worth naming precisely.</p>
+
+  <div class="fieldnote">
+    <div class="head">→ silent hang <span class="chip flag">found day one</span></div>
+    <p>The obvious way to ask Mail for "messages since date X" is a predicate filter — <code>whose({dateReceived: {greaterThan: cutoff}})</code>. On a mailbox with tens of thousands of messages, that predicate can take minutes to evaluate, well past any script's patience, and it fails <em>silently</em>: a scheduled job just stops producing output, no error, no crash.</p>
+    <p>The fix was to stop asking Mail to filter at all. Pull the cheap properties — id, date, sender, subject — for <em>every</em> message in one bulk call (fast: under a second for thousands of messages), then filter in-process. Same result, no predicate, no hang.</p>
+  </div>
+
+  <div class="fieldnote">
+    <div class="head">→ mailbox names lie <span class="chip flag">found in production</span></div>
+    <p>Apple Mail's mailbox lookup does a case-sensitive <em>substring</em> match with no error on a near-miss. Asking for a mailbox named <code>Junk</code> on an Exchange account silently resolves to <code>Junk Email</code> — and the reverse trips too: asking for <code>INBOX</code> where the real name is <code>Inbox</code> fails outright, since the cases don't overlap at all.</p>
+    <p>Two different failure shapes from the same root cause, both invisible until a message actually needed to move. The fix: never trust the name you asked for — read back whatever the lookup actually resolved to, and use that.</p>
+  </div>
+
+  <h2 class="section">Why nothing here is risky <span class="tag">safety model</span></h2>
+  <div class="safety">
+    <p class="head">Every action needs a yes</p>
+    <ul>
+      <li>Read-only against the mailbox by default — classification never moves or deletes a message on its own.</li>
+      <li>An unsubscribe fires only after a person approves that specific sender, one at a time.</li>
+      <li>A calendar entry is written only after a person approves that specific event.</li>
+      <li>A "protect this sender" option exists everywhere a queue does, so a correct decision only has to be made once.</li>
+      <li>State lives in one file on the machine. Delete it, start clean, nothing to migrate.</li>
+    </ul>
+  </div>
+
+  <h2 class="section">Try the shape of it <span class="tag">get started</span></h2>
+  <p>The tool runs entirely local and MIT-licensed: <a href="https://github.com/retrogradespace/mailsweep-oss" target="_blank" rel="noopener">github.com/retrogradespace/mailsweep-oss</a>. But the shape of it travels even without the code: classify cheaply first, escalate only the ambiguous remainder to a model, and gate every write behind an explicit yes.</p>
+  <pre><code># the daily loop, in full
+mailsweep scan            # classify new mail, queue candidates, write the digest
+mailsweep unsub review    # y / n / protect, one sender at a time
+mailsweep events review   # y / dismiss, one event at a time
+mailsweep spam review     # rescue / leave / protect, one message at a time</code></pre>
+
+  <footer>
+    <span>De-identified case study — no sender, account, or message content included.</span>
+    <span><a href="https://github.com/retrogradespace/mailsweep-oss" target="_blank" rel="noopener">Source on GitHub</a></span>
+  </footer>
+
+</div>
+</body>
+</html>
