@@ -4,14 +4,13 @@
 [mail]
 # Apple Mail account names to scan, exactly as they appear in Mail.app's
 # sidebar / Settings > Accounts. Leave empty to scan every enabled account.
-# If use Proton or email account with mail bridge ensure this is installed 
-# and it appears here too once Proton Mail Bridge is running
+# Your Proton account appears here too once Proton Mail Bridge is running
 # and the account is added to Mail.app.
 accounts = []          # e.g. ["Personal", "Work", "Proton"]
 
 # How many days back to scan on each run. First run can be larger (e.g. 30)
 # to seed sender statistics; daily runs only re-process unseen messages.
-lookback_days = 7 
+lookback_days = 7
 
 # Max messages pulled per mailbox per run (safety valve for huge inboxes).
 max_messages = 400
@@ -41,7 +40,7 @@ horizon_days = 60
 # anything else opens the unsubscribe URL in your browser for you to finish.
 mode = "one_click"
 # Senders matching these substrings are never suggested for unsubscribe.
-protected = []         # e.g. ["@youruni.edu", "billing@"]
+protected = []         # e.g. ["@utah.edu", "billing@"]
 
 [digest]
 # Where the HTML digest is written.

@@ -1,9 +1,7 @@
 [project]
 name = "mailsweep"
-version = "0.3.0"
-description = "Local mail triage: surface buried events, queue unsubscribes, audit spam false positives, draft purchase reviews from order mail, quantify inbox noise. Apple Mail + Calendar + Ollama."
-readme = "README.md"
-license = { text = "MIT" }
+version = "0.1.0"
+description = "Local mail triage: surface buried events, queue unsubscribes, quantify inbox noise. Apple Mail + Calendar + Ollama."
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
@@ -21,3 +19,4 @@ include = ["mailsweep*"]
 
 [tool.setuptools.package-data]
 mailsweep = ["jxa/*.js"]
+"mailsweep.ui" = ["static/*"]

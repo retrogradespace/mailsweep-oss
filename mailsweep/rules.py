@@ -12,14 +12,36 @@ _MARKETING_SUBJECT = re.compile(
 _NOTIFICATION_SENDERS = re.compile(
     r"(no-?reply|do-?not-?reply|notifications?@|alerts?@|updates?@|mailer-daemon)", re.I)
 _TRANSACTIONAL_SUBJECT = re.compile(
-    r"(receipt|invoice|order (confirm|#|no)|payment|shipped|delivery|statement"
-    r"|password|verification code|security alert|sign-?in)", re.I)
+    r"(receipt|invoice|order (confirm|#|no)|payment|shipp(ed|ing)|deliver(y|ed)"
+    r"|out for delivery|^ordered:|we received your order|statement"
+    r"|password|verification code|one-time code|security alert|sign[\s-]?in|refund)", re.I)
+# Repeated ETA/status-ping and engagement-bait noise from retail/delivery
+# senders -- distinct from an actual order confirmation or final delivery
+# notice, and checked first so it isn't caught by _TRANSACTIONAL_SUBJECT just
+# because it mentions "delivery" or "order". Scoped to specific confirmed
+# phrasings (see the noisy-sender pattern review), not general keywords, to
+# avoid burying anything that isn't actually noise.
+_RETAIL_NOISE_SUBJECT = re.compile(
+    r"(your daily digest for|delivery estimate update|your delivery should arrive by"
+    r"|welcome to dashpass|ordering for others\? add another person for free"
+    r"|welcome to shein!|right here, waiting for you"
+    r"|review your recent .+ purchase|your reviews? have been posted"
+    r"|take our survey|tell us how we did|chat transcript|has commented on your review"
+    r"|a new reward is waiting for you|here.s your promo code)", re.I)
 _EVENTISH = re.compile(
     r"(invit(e|ation)|rsvp|webinar|meeting|appointment|reschedul|event|register"
     r"|save the date|reminder:|starts at|join us|conference|deadline)", re.I)
+# A calendar app's own reminder is about something already on that calendar --
+# never a new event to extract. Proton in particular sends a generic "event
+# starting at HH:MM" subject with no title (a privacy feature), so there's
+# nothing for the on-calendar dedup check to match against either; without
+# this exclusion every reminder becomes a spurious duplicate suggestion.
+_CALENDAR_SELF_REMINDER = re.compile(
+    r"(calendar\.proton\.me|calendar-notification@|calendar-server@|no-?reply@calendar\.)",
+    re.I)
 _SPAM_AUDIT_SUBJECT = re.compile(
     r"(receipt|invoice|order (confirm|#|no)|payment|shipped|deliver|statement"
-    r"|security alert|sign-?in|verification code|confirmation|purchase|billing"
+    r"|security alert|sign[\s-]?in|verification code|one-time code|confirmation|purchase|billing"
     r"|account (alert|notice)|password|two-factor|2fa|refund|credit report"
     r"|new inquiry|identity verification|new letter)", re.I)
 
@@ -52,6 +74,9 @@ def classify_by_rules(msg: Message) -> Classification:
     is_list = bool(msg.list_unsubscribe or msg.headers.get("list-id"))
     is_bulk = msg.headers.get("precedence", "").lower() in {"bulk", "list", "junk"}
 
+    if _RETAIL_NOISE_SUBJECT.search(subj):
+        return Classification("junk", "low",
+                              "retail engagement noise (ETA update, review/survey request, promo nudge)")
     if _TRANSACTIONAL_SUBJECT.search(subj):
         return Classification("transactional", "normal", "receipt/security-style subject")
     if is_list and _MARKETING_SUBJECT.search(subj):
@@ -66,6 +91,8 @@ def classify_by_rules(msg: Message) -> Classification:
 
 def maybe_event(msg: Message) -> bool:
     """Should this message be shown to the LLM for event extraction?"""
+    if _CALENDAR_SELF_REMINDER.search(msg.sender_email or msg.sender or ""):
+        return False
     return bool(_EVENTISH.search(f"{msg.subject} {msg.snippet[:500]}"))
 
 
@@ -106,15 +133,18 @@ def flag_spam_audit(subject: str, sender: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------- purchase review
 _ORDER_PLACED_SUBJECT = re.compile(
     r"(order confirm|thank you for your order|your order (has been placed|is confirmed)"
-    r"|order #|order no\.?|order number|receipt for (your )?order)", re.I)
+    r"|order #|order no\.?|order number|receipt for (your )?order"
+    r"|^ordered:|we.ve received your order|we received your order"
+    r"|thanks for your (delivery )?order)", re.I)
 _SHIPPED_SUBJECT = re.compile(
-    r"(has shipped|shipping confirmation|shipment confirmation|tracking (number|info)"
-    r"|on its way|on it.s way)", re.I)
+    r"(has (been )?shipped|shipping confirmation|shipment confirmation|tracking (number|info)"
+    r"|on its way|on it.s way|out for delivery|delivery rescheduled"
+    r"|shipping label created|shipping notification)", re.I)
 _DELIVERED_SUBJECT = re.compile(
     r"\b(delivered|delivery complete|delivery confirmation)\b", re.I)
 _RETURN_SUBJECT = re.compile(
     r"(return (label|confirmation|received)|refund (issued|processed|confirmation)"
-    r"|we.ve received your return)", re.I)
+    r"|we.ve received your return|charge refund)", re.I)
 _ORDER_REF_RE = re.compile(
     r"\b(\d{3}-\d{7}-\d{7})\b"                                    # Amazon-style
     r"|order[^\d#:]{0,20}[#:]\s*(\d{5,})", re.I)                  # "Order Confirmation #123456" etc.

@@ -45,6 +45,7 @@ def _run_jxa(script: str, args: dict, timeout: int = 1800):
 _WANTED_HEADERS = {
     "list-unsubscribe", "list-unsubscribe-post", "list-id",
     "precedence", "x-mailer", "auto-submitted", "reply-to", "from", "to",
+    "authentication-results",
 }
 
 
@@ -95,14 +96,17 @@ def fetch_messages(lookback_days: int, max_messages: int,
             snippet=item.get("snippet", ""),
             headers=parse_headers(item.get("header_block", "")),
             mail_id=item.get("mail_id", 0) or 0,
+            replied_status=bool(item.get("replied_status", False)),
         ))
     return messages
 
 
-def fetch_calendar_events(horizon_days: int, calendars: list[str]) -> list[dict]:
+def fetch_calendar_events(horizon_days: int, calendars: list[str],
+                          today_only: bool = False) -> list[dict]:
     return _run_jxa("calendar_read.js", {
         "horizonDays": horizon_days,
         "calendars": calendars,
+        "todayOnly": today_only,
     })
 
 

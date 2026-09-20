@@ -1,5 +1,6 @@
 """Unit tests for the pure-Python parts of MailSweep."""
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -7,11 +8,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from mailsweep.bridge import parse_headers
 from mailsweep.classify import (clean_html, parse_llm_response, parse_purchase_item_response,
                                 parse_review_draft_response, parse_spam_audit_response,
-                                _extract_json)
+                                _extract_json, build_feedback_block)
 from mailsweep.cli import _explain_move_error, events_match
 from mailsweep.config import Config
 from mailsweep.digest import render_html
 from mailsweep.models import Classification, EventCandidate, Message
+from mailsweep.timeparse import normalize_end, normalize_start, parse_user_datetime
 from mailsweep.rules import (classify_by_rules, extract_order_ref, flag_spam_audit, kind_rank,
                              maybe_event, purchase_kind, spoofed_sender, unsubscribe_targets,
                              vendor_from_sender)
@@ -127,6 +129,122 @@ def test_events_match():
     assert not events_match("X", "", "X", "2026-07-25")
 
 
+# ---------------------------------------------------------------- event date/time handling
+def test_normalize_start_formats():
+    assert normalize_start("2026-09-20T19:00") == ("2026-09-20T19:00", False)
+    assert normalize_start("2026-09-22") == ("2026-09-22", True)
+    # midnight means "no time given", with or without a timezone suffix
+    assert normalize_start("2026-09-22T00:00") == ("2026-09-22", True)
+    assert normalize_start("2027-10-01T00:00:00+00:00") == ("2027-10-01", True)
+    assert normalize_start("2026-08-31T") == ("2026-08-31", True)
+    # the model's habitual UTC suffix is dropped, not converted: the wall clock is what was written
+    assert normalize_start("2026-08-05T11:30:00.000Z") == ("2026-08-05T11:30", False)
+    assert normalize_start("2026-08-04T10:15:00+00:00") == ("2026-08-04T10:15", False)
+    # a real zone is converted to local time (expected value computed so this holds on any machine)
+    from datetime import timedelta, timezone
+    want = datetime(2026, 8, 11, 10, 0, tzinfo=timezone(timedelta(hours=-7))).astimezone()
+    assert normalize_start("2026-08-11T10:00:00-07:00") == (want.strftime("%Y-%m-%dT%H:%M"), False)
+    assert normalize_start("2026-08-11T00:00:00-07:00") == ("2026-08-11", True)   # midnight stays date-only
+    # formats Calendar's parser rejects outright
+    assert normalize_start("2026-08-04T12:00pm") == ("2026-08-04T12:00", False)
+    assert normalize_start("2026-08-01T11:45A") == ("2026-08-01T11:45", False)
+    assert normalize_start("2026-09-16T0800") == ("2026-09-16T08:00", False)
+    assert normalize_start("2026-09-16T8pm") == ("2026-09-16T20:00", False)
+    # no usable date
+    assert normalize_start("2026-02-30T10:00") is None
+    assert normalize_start("next Thursday") is None
+    assert normalize_start("") is None
+
+
+def test_normalize_end():
+    assert normalize_end("2026-09-20T19:00", "2026-09-20T21:00:00Z") == "2026-09-20T21:00"
+    assert normalize_end("2026-09-20T19:00", "2026-09-20T18:00") == ""      # not after start
+    assert normalize_end("2026-09-20T19:00", "2026-09-20") == ""            # timed start, no end time
+    assert normalize_end("2026-09-20", "2026-09-22") == "2026-09-22"        # multi-day all-day
+    assert normalize_end("2026-09-20", "2026-09-20") == ""
+    assert normalize_end("2026-09-20T19:00", "") == ""
+
+
+def test_parse_user_datetime():
+    from datetime import date
+    today = date(2026, 9, 19)
+    assert parse_user_datetime("2026-09-20", today) == ("2026-09-20", True)
+    assert parse_user_datetime("2026-09-20 14:30", today) == ("2026-09-20T14:30", False)
+    assert parse_user_datetime("9/20 2:30pm", today) == ("2026-09-20T14:30", False)
+    assert parse_user_datetime("9/20/27", today) == ("2027-09-20", True)
+    assert parse_user_datetime("sometime soon", today) is None
+
+
+def test_parse_llm_response_normalizes_event_times():
+    def parse(start, end="", all_day=False):
+        text = ('{"category":"personal","importance":"normal","reason":"x","event":{"title":"T",'
+                f'"start":"{start}","end":"{end}","all_day":{str(all_day).lower()},"confidence":0.9}}}}')
+        return parse_llm_response(text, make_msg()).event
+
+    ev = parse("2026-09-22T00:00:00+00:00")           # UTC midnight would land on the 21st in Calendar
+    assert ev.start == "2026-09-22" and ev.all_day
+    ev = parse("2026-08-05T11:30:00.000Z", "2026-08-05T12:30:00.000Z")
+    assert (ev.start, ev.end, ev.all_day) == ("2026-08-05T11:30", "2026-08-05T12:30", False)
+    assert parse("2026-13-45T10:00") is None           # no real date -> no candidate to review
+
+
+def test_flag_event_time_keeps_original_and_feeds_prompt(tmp_path):
+    store = Store(tmp_path / "t.db")
+    msg = make_msg()
+    store.record_message(msg, Classification("personal", "normal", "t"))
+    store.add_event(EventCandidate("Gala", "2026-09-20T19:00", "", "", 0.9,
+                                   msg.message_id, "Gala invite", msg.sender))
+    ev_id = store.events_by_status("new")[0]["id"]
+
+    assert store.flag_event_time(ev_id, "2026-09-20T14:30", "2026-09-20T16:00", False)
+    row = store.event_by_id(ev_id)
+    assert (row["start"], row["end"], row["time_flagged"]) == ("2026-09-20T14:30", "2026-09-20T16:00", 1)
+    assert row["original_start"] == "2026-09-20T19:00"
+
+    # a second fix keeps the *first* extraction as the "wrong" value
+    assert store.flag_event_time(ev_id, "2026-09-20", "", True)
+    assert store.event_by_id(ev_id)["original_start"] == "2026-09-20T19:00"
+
+    block = build_feedback_block(store)
+    assert "extracted 2026-09-20T19:00, correct was 2026-09-20" in block
+
+    # correcting onto a time already saved for the same email+title is refused, not crashed
+    store.add_event(EventCandidate("Gala", "2026-09-21T10:00", "", "", 0.9,
+                                   msg.message_id, "Gala invite", msg.sender))
+    other = [r for r in store.events_by_status("new") if r["id"] != ev_id][0]
+    assert not store.flag_event_time(other["id"], "2026-09-20", "", True)
+    assert store.event_by_id(other["id"])["start"] == "2026-09-21T10:00"
+    store.close()
+
+
+def test_store_repairs_pending_event_times(tmp_path):
+    db = tmp_path / "t.db"
+    store = Store(db)
+    cols = ("source_message_id, source_subject, source_sender, source_sender_email, title, "
+            "start, end, location, confidence, all_day, status")
+    rows = [
+        ("<a>", "s", "S <s@x.com>", "s@x.com", "Midnight UTC", "2027-10-01T00:00:00+00:00", "", "", 0.9, 0, "new"),
+        ("<b>", "s", "S <s@x.com>", "s@x.com", "Odd format", "2026-08-04T12:00pm", "", "", 0.9, 0, "new"),
+        ("<c>", "s", "S <s@x.com>", "s@x.com", "Dup", "2026-09-10T12:00:00", "", "", 0.9, 0, "new"),
+        ("<c>", "s", "S <s@x.com>", "s@x.com", "Dup", "2026-09-10T12:00", "", "", 0.9, 0, "new"),
+        ("<d>", "s", "S <s@x.com>", "s@x.com", "Already created", "2026-09-01T00:00", "", "", 0.9, 0, "created"),
+    ]
+    for r in rows:
+        store.conn.execute(f"INSERT INTO events ({cols}, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'x')", r)
+    store.commit()
+    store.close()
+
+    store = Store(db)                                   # opening the store runs the repair
+    by_title = {}
+    for r in store.conn.execute("SELECT * FROM events ORDER BY id"):
+        by_title.setdefault(r["title"], []).append(r)
+    assert (by_title["Midnight UTC"][0]["start"], by_title["Midnight UTC"][0]["all_day"]) == ("2027-10-01", 1)
+    assert by_title["Odd format"][0]["start"] == "2026-08-04T12:00"
+    assert [r["status"] for r in by_title["Dup"]] == ["dismissed", "new"]      # duplicate dropped, not crashed
+    assert by_title["Already created"][0]["start"] == "2026-09-01T00:00"      # history is left alone
+    store.close()
+
+
 # ---------------------------------------------------------------- store + digest
 def test_store_roundtrip(tmp_path):
     store = Store(tmp_path / "t.db")
@@ -134,7 +252,10 @@ def test_store_roundtrip(tmp_path):
     store.record_message(msg, Classification("marketing", "low", "test"))
     store.upsert_unsub(msg, ["https://shop.com/u"])
     store.upsert_unsub(msg, ["https://shop.com/u"])
-    ev = EventCandidate("Show", "2026-08-01T19:00", "", "SLC", 0.8,
+    # Digest hides already-passed event candidates, so this needs to stay in
+    # the future relative to whenever the test actually runs.
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT19:00")
+    ev = EventCandidate("Show", tomorrow, "", "SLC", 0.8,
                         msg.message_id, msg.subject, msg.sender)
     store.add_event(ev)
     store.add_event(ev)  # duplicate ignored
@@ -157,7 +278,7 @@ def test_store_roundtrip(tmp_path):
 
 def test_store_trash_refs_roundtrip(tmp_path):
     store = Store(tmp_path / "t.db")
-    msg = make_msg(mail_id=555, headers={"to": "Jane Doe <jane@example.com>"})
+    msg = make_msg(mail_id=555, headers={"to": "Jamie Test <you@example.com>"})
     store.record_message(msg, Classification("marketing", "low", "test"))
     ev = EventCandidate("Show", "2026-08-01T19:00", "", "SLC", 0.8,
                         msg.message_id, msg.subject, msg.sender)
@@ -169,10 +290,148 @@ def test_store_trash_refs_roundtrip(tmp_path):
 
     ref = store.message_ref(msg.message_id)
     assert ref is not None and ref["mail_id"] == 555
-    assert ref["to_addr"] == "Jane Doe <jane@example.com>"
+    assert ref["to_addr"] == "Jamie Test <you@example.com>"
 
     assert store.message_ref("<no-such-id>") is None
     assert store.messages_by_sender("nobody@nowhere.com") == []
+    store.close()
+
+
+def test_noise_stats_reports_most_recent_subject_and_date(tmp_path):
+    """last_subject/last_received should track the most recently received
+    message, not the alphabetically-max subject."""
+    store = Store(tmp_path / "t.db")
+    older = make_msg(message_id="<1@x>", subject="Zzz early newsletter",
+                     date_received="2026-07-01T09:00:00Z")
+    newer = make_msg(message_id="<2@x>", subject="Aaa later newsletter",
+                     date_received="2026-07-18T09:00:00Z")
+    store.record_message(older, Classification("newsletter", "low", "test"))
+    store.record_message(newer, Classification("newsletter", "low", "test"))
+    store.commit()
+
+    rows = store.noise_stats(days=30)
+    assert len(rows) == 1
+    assert rows[0]["n"] == 2
+    assert rows[0]["last_subject"] == "Aaa later newsletter"
+    assert rows[0]["last_received"] == "2026-07-18T09:00:00Z"
+    store.close()
+
+
+def test_classify_feedback_roundtrip(tmp_path):
+    store = Store(tmp_path / "t.db")
+    msg = make_msg(message_id="<fb1@x>")
+    store.record_message(msg, Classification("marketing", "low", "test", used_llm=True))
+    store.commit()
+
+    pending = store.unreviewed_llm_messages()
+    assert len(pending) == 1 and pending[0]["message_id"] == "<fb1@x>"
+
+    # A confirmed-correct review carries no correction signal.
+    store.record_classify_feedback("<fb1@x>", "Hello", "Shop <deals@shop.com>",
+                                   "marketing", "low", "marketing", "low")
+    store.commit()
+    assert store.unreviewed_llm_messages() == []
+    assert store.classify_corrections() == []
+
+    # An actual correction shows up as a few-shot example.
+    msg2 = make_msg(message_id="<fb2@x>")
+    store.record_message(msg2, Classification("marketing", "low", "test", used_llm=True))
+    store.record_classify_feedback("<fb2@x>", "Invoice due", "Shop <deals@shop.com>",
+                                   "marketing", "low", "transactional", "high")
+    store.commit()
+    corrections = store.classify_corrections()
+    assert len(corrections) == 1
+    assert corrections[0]["correct_category"] == "transactional"
+    assert corrections[0]["correct_importance"] == "high"
+    store.close()
+
+
+def test_unreviewed_llm_messages_filters_by_category(tmp_path):
+    store = Store(tmp_path / "t.db")
+    store.record_message(make_msg(message_id="<c1@x>", subject="Sale"),
+                         Classification("marketing", "low", "t", used_llm=True))
+    store.record_message(make_msg(message_id="<c2@x>", subject="Newsletter"),
+                         Classification("newsletter", "low", "t", used_llm=True))
+    store.commit()
+
+    marketing_only = store.unreviewed_llm_messages(category="marketing")
+    assert [r["message_id"] for r in marketing_only] == ["<c1@x>"]
+
+    everything = store.unreviewed_llm_messages()
+    assert {r["message_id"] for r in everything} == {"<c1@x>", "<c2@x>"}
+    store.close()
+
+
+def test_unreviewed_llm_messages_hides_already_actioned_by_default(tmp_path):
+    store = Store(tmp_path / "t.db")
+
+    # Sender already dealt with in unsub review -> hidden by default.
+    unsub_msg = make_msg(message_id="<u1@x>", sender="Shop <deals@shop.com>",
+                         sender_email="deals@shop.com")
+    store.record_message(unsub_msg, Classification("marketing", "low", "t", used_llm=True))
+    store.upsert_unsub(unsub_msg, ["https://shop.com/u"])
+    store.set_unsub_status("deals@shop.com", "done")
+
+    # Message whose extracted event was already resolved -> hidden by default.
+    event_msg = make_msg(message_id="<e1@x>", sender="Venue <v@venue.com>",
+                         sender_email="v@venue.com")
+    store.record_message(event_msg, Classification("personal", "normal", "t", used_llm=True))
+    ev = EventCandidate("Show", "2026-08-01T19:00", "", "", 0.8,
+                        "<e1@x>", event_msg.subject, event_msg.sender)
+    store.add_event(ev)
+    store.set_event_status(store.events_by_status("new")[0]["id"], "dismissed")
+
+    # Untouched message -> still shows up.
+    plain_msg = make_msg(message_id="<p1@x>", sender="Amy <amy@x.com>", sender_email="amy@x.com")
+    store.record_message(plain_msg, Classification("personal", "normal", "t", used_llm=True))
+    store.commit()
+
+    default = store.unreviewed_llm_messages()
+    assert {r["message_id"] for r in default} == {"<p1@x>"}
+
+    everything = store.unreviewed_llm_messages(include_actioned=True)
+    assert {r["message_id"] for r in everything} == {"<u1@x>", "<e1@x>", "<p1@x>"}
+    store.close()
+
+
+def test_event_feedback_examples_buckets_by_status(tmp_path):
+    store = Store(tmp_path / "t.db")
+    dismissed = EventCandidate("Package delivery", "2026-08-01T09:00", "", "", 0.6,
+                               "<e1@x>", "Your package is on its way", "UPS <n@ups.com>")
+    confirmed = EventCandidate("Dentist", "2026-08-02T14:00", "", "Office", 0.9,
+                               "<e2@x>", "Appointment reminder", "Dr. Smith <d@clinic.com>")
+    store.add_event(dismissed)
+    store.add_event(confirmed)
+    store.set_event_status(store.events_by_status("new")[0]["id"], "dismissed")
+    ids = [r["id"] for r in store.events_by_status("new")]
+    store.set_event_status(ids[0], "created")
+    store.commit()
+
+    positive, negative = store.event_feedback_examples()
+    assert len(positive) == 1 and positive[0]["title"] == "Dentist"
+    assert len(negative) == 1 and negative[0]["source_subject"] == "Your package is on its way"
+    store.close()
+
+
+def test_feedback_block_empty_without_store():
+    assert build_feedback_block(None) == ""
+
+
+def test_feedback_block_renders_corrections_and_events(tmp_path):
+    store = Store(tmp_path / "t.db")
+    store.record_message(make_msg(message_id="<fb3@x>"),
+                         Classification("marketing", "low", "test", used_llm=True))
+    store.record_classify_feedback("<fb3@x>", "Invoice due", "Shop <deals@shop.com>",
+                                   "marketing", "low", "transactional", "high")
+    ev = EventCandidate("Package delivery", "2026-08-01T09:00", "", "", 0.6,
+                        "<e3@x>", "Your package is on its way", "UPS <n@ups.com>")
+    store.add_event(ev)
+    store.set_event_status(store.events_by_status("new")[0]["id"], "dismissed")
+    store.commit()
+
+    block = build_feedback_block(store)
+    assert "transactional" in block and "Invoice due" in block
+    assert "NOT a real event" in block and "package is on its way" in block
     store.close()
 
 
@@ -180,14 +439,14 @@ def test_store_message_ref_without_mail_id_still_shows_display_fields(tmp_path):
     """A message scanned before mail_id tracking existed still shows account/to
     for display, it just can't be trashed (mail_id stays NULL)."""
     store = Store(tmp_path / "t.db")
-    msg = make_msg(headers={"to": "jane@example.com"})  # mail_id defaults to 0
+    msg = make_msg(headers={"to": "you@example.com"})  # mail_id defaults to 0
     store.record_message(msg, Classification("marketing", "low", "test"))
     store.commit()
 
     ref = store.message_ref(msg.message_id)
     assert ref is not None
     assert ref["mail_id"] is None
-    assert ref["to_addr"] == "jane@example.com"
+    assert ref["to_addr"] == "you@example.com"
     assert store.messages_by_sender(msg.sender_email) == []  # excluded: no mail_id
     store.close()
 
@@ -243,17 +502,19 @@ def test_store_backfills_blank_event_sender_email_on_open(tmp_path):
 
 def test_unsub_queue_tracks_last_to(tmp_path):
     store = Store(tmp_path / "t.db")
-    msg = make_msg(headers={"to": "jane@example.com"})
+    msg = make_msg(headers={"to": "you@example.com"}, date_received="2026-07-01T09:00:00Z")
     store.upsert_unsub(msg, ["https://shop.com/u"])
     store.commit()
     row = store.unsub_by_status("suggested")[0]
-    assert row["last_to"] == "jane@example.com"
+    assert row["last_to"] == "you@example.com"
+    assert row["last_received"] == "2026-07-01T09:00:00Z"
 
-    msg2 = make_msg(headers={"to": "second@example.com"})
+    msg2 = make_msg(headers={"to": "second@example.com"}, date_received="2026-07-18T09:00:00Z")
     store.upsert_unsub(msg2, ["https://shop.com/u"])
     store.commit()
     row = store.unsub_by_status("suggested")[0]
     assert row["last_to"] == "second@example.com"
+    assert row["last_received"] == "2026-07-18T09:00:00Z"
     store.close()
 
 

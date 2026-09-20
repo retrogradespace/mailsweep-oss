@@ -60,10 +60,12 @@ function run(argv) {
 
       let headerBlock = "";
       let content = "";
+      let repliedStatus = false;
       try {
         const msg = mbx.messages.byId(ids[i]);
         headerBlock = String(msg.allHeaders() || "").slice(0, 8000);
         content = String(msg.content() || "").slice(0, 2000);
+        repliedStatus = !!msg.wasRepliedTo();
       } catch (e) { /* keep going with what we have */ }
 
       out.push({
@@ -75,7 +77,8 @@ function run(argv) {
         subject: String(subjects[i] || ""),
         date_received: dates[i] ? dates[i].toISOString() : "",
         header_block: headerBlock,
-        snippet: content
+        snippet: content,
+        replied_status: repliedStatus
       });
       kept++;
     }

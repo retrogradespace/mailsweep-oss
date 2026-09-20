@@ -17,6 +17,7 @@ function resolveMailbox(acct, requestedName) {
   if (upper === "INBOX") candidates.push("INBOX", "Inbox");
   if (upper === "TRASH") candidates.push("Trash", "Deleted Items", "Deleted Messages", "Bin");
   if (upper === "ARCHIVE") candidates.push("Archive", "All Mail", "Archived");
+  if (upper === "JUNK") candidates.push("Junk", "Junk Email", "Spam");
   for (let i = 0; i < candidates.length; i++) {
     try {
       const mbx = acct.mailboxes.byName(candidates[i]);

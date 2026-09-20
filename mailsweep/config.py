@@ -50,6 +50,7 @@ class UnsubCfg:
 class DigestCfg:
     output_dir: str = "~/MailSweep"
     terminal: bool = True
+    keep_days: int = 14   # dated digest-YYYY-MM-DD.html files older than this are deleted each scan
 
 
 @dataclass
@@ -57,6 +58,16 @@ class SpamAuditCfg:
     enabled: bool = True
     llm_review: bool = True
     llm_max_per_scan: int = 40
+
+
+@dataclass
+class BriefCfg:
+    needs_response_days: int = 3   # how far back to look for high-importance, unreplied mail
+
+
+@dataclass
+class GcCfg:
+    keep_days: int = 180   # `mailsweep gc` deletes messages rows older than this
 
 
 @dataclass
@@ -75,6 +86,8 @@ class Config:
     digest: DigestCfg = field(default_factory=DigestCfg)
     spam_audit: SpamAuditCfg = field(default_factory=SpamAuditCfg)
     purchases: PurchasesCfg = field(default_factory=PurchasesCfg)
+    brief: BriefCfg = field(default_factory=BriefCfg)
+    gc: GcCfg = field(default_factory=GcCfg)
 
     @property
     def db_path(self) -> Path:
@@ -103,7 +116,7 @@ def load(path: Path | None = None) -> Config:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
         for section in ("mail", "model", "calendar", "unsubscribe", "digest", "spam_audit",
-                        "purchases"):
+                        "purchases", "brief", "gc"):
             if section in raw:
                 _apply(getattr(cfg, section), raw[section])
     return cfg

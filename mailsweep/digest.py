@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .store import Store
+
+_DATED_NAME = re.compile(r"^digest-(\d{4}-\d{2}-\d{2})\.html$")
 
 _CSS = """
 body{font-family:-apple-system,Helvetica,sans-serif;max-width:820px;margin:2rem auto;
@@ -48,9 +51,14 @@ def render_html(store: Store, run_info: dict) -> str:
         parts.append(f"<p>Last 7 days: {chips}</p>")
 
     parts.append("<h2>Events that might get buried</h2>")
-    if events:
+    today = datetime.now().strftime("%Y-%m-%d")
+    upcoming = sorted((e for e in events if e["start"] >= today),
+                      key=lambda e: e["created_at"], reverse=True)
+    past = len(events) - len(upcoming)
+    if upcoming:
+        shown, extra = upcoming[:20], max(0, len(upcoming) - 20)
         parts.append("<table><tr><th>When</th><th>What</th><th>From</th><th>Conf.</th></tr>")
-        for e in events:
+        for e in shown:
             parts.append(
                 f"<tr class='event'><td>{_esc(e['start'])}</td>"
                 f"<td>{_esc(e['title'])}"
@@ -58,8 +66,17 @@ def render_html(store: Store, run_info: dict) -> str:
                 + f"</td><td>{_esc(e['source_sender'])}<br>"
                 f"<span class='muted'>{_esc(e['source_subject'])}</span></td>"
                 f"<td>{e['confidence']:.0%}</td></tr>")
-        parts.append("</table><p class='muted'>Review with <code>mailsweep events review</code> "
-                     "to add these to Calendar.</p>")
+        parts.append("</table>")
+        note = "Review with <code>mailsweep events review</code> to add these to Calendar."
+        if extra:
+            note = f"+{extra} more upcoming candidate(s) not shown. " + note
+        if past:
+            note += f" ({past} more pending candidate(s) have already passed and are hidden here.)"
+        parts.append(f"<p class='muted'>{note}</p>")
+    elif past:
+        parts.append(f"<p class='muted'>Nothing upcoming, but {past} pending candidate(s) have "
+                     "already passed -- clean up the backlog with "
+                     "<code>mailsweep events review</code>.</p>")
     else:
         parts.append("<p class='muted'>Nothing new detected.</p>")
 
@@ -113,12 +130,38 @@ def render_html(store: Store, run_info: dict) -> str:
     return "".join(parts)
 
 
+def _write_atomic(dest: Path, text: str) -> None:
+    """Write via a temp file + rename instead of truncating dest in place.
+    OneDrive's sync engine holds a lock on digest-latest.html often enough
+    (it's the file re-read/re-opened on every run) to raise EDEADLK on a
+    direct write_text; replace() doesn't open dest for writing, so it
+    doesn't race that lock."""
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(dest)
+
+
 def write_html(store: Store, run_info: dict, out_dir: Path) -> Path:
     path = out_dir / f"digest-{datetime.now():%Y-%m-%d}.html"
-    path.write_text(render_html(store, run_info), encoding="utf-8")
-    latest = out_dir / "digest-latest.html"
-    latest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    html = render_html(store, run_info)
+    _write_atomic(path, html)
+    _write_atomic(out_dir / "digest-latest.html", html)
     return path
+
+
+def prune_old(out_dir: Path, keep_days: int) -> int:
+    """Delete dated digest-YYYY-MM-DD.html files older than keep_days.
+    Parses the date from the filename rather than mtime, so a re-render of
+    an old digest can't accidentally save it from pruning. Never touches
+    digest-latest.html. Returns the count removed."""
+    cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+    removed = 0
+    for f in out_dir.glob("digest-*.html"):
+        m = _DATED_NAME.match(f.name)
+        if m and m.group(1) < cutoff:
+            f.unlink()
+            removed += 1
+    return removed
 
 
 def print_terminal(store: Store, run_info: dict) -> None:

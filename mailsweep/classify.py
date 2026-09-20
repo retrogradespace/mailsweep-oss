@@ -11,16 +11,31 @@ import requests
 from . import rules
 from .config import ModelCfg
 from .models import CATEGORIES, IMPORTANCE, Classification, EventCandidate, Message
+from .timeparse import normalize_end, normalize_start
 
 _PROMPT = """You are an email triage assistant. Today is {today}.
 Classify the email below and extract any real-world event the recipient might
 need on their calendar (meetings, appointments, invitations, deadlines,
 performances, webinars they registered for). Marketing "events" like sales
 do NOT count.
+{feedback}
+Category notes: spam_phishing = unsolicited scams, fake security/account alerts,
+phishing attempts. junk = low-value bulk mail not worth reading, distinct from a
+newsletter/marketing list the recipient actually signed up for -- this includes
+repeated delivery-ETA/status pings from an order you already placed (e.g. a
+revised arrival-time estimate), since only the original order confirmation and
+the final delivery notice carry lasting value. trash = disposable, safe to
+discard outright (e.g. a stale automated notice).
+
+Event times: the recipient's local timezone is {tz}. Write "start" and "end" as local
+wall-clock time with NO timezone suffix (no Z, no +00:00). If the email lists several
+time zones, use the recipient's. If the email states no clock time, give the date only
+(YYYY-MM-DD) and set all_day to true -- never invent a time like 00:00 or 12:00. Resolve
+words like "Thursday" or "tomorrow" from the email's Date line, not from today.
 
 Reply with ONLY a JSON object, no other text:
 {{
-  "category": "personal|work|transactional|newsletter|marketing|notification",
+  "category": "personal|work|transactional|newsletter|marketing|notification|spam_phishing|junk|trash",
   "importance": "high|normal|low",
   "reason": "<one short phrase>",
   "event": null or {{
@@ -89,30 +104,104 @@ def parse_llm_response(text: str, msg: Message) -> Classification | None:
     event = None
     ev = data.get("event")
     if isinstance(ev, dict) and ev.get("title") and ev.get("start"):
-        try:
-            confidence = float(ev.get("confidence", 0.5))
-        except (TypeError, ValueError):
-            confidence = 0.5
-        event = EventCandidate(
-            title=str(ev["title"])[:200],
-            start=str(ev["start"]),
-            end=str(ev.get("end", "") or ""),
-            location=str(ev.get("location", "") or "")[:200],
-            confidence=max(0.0, min(1.0, confidence)),
-            source_message_id=msg.message_id,
-            source_subject=msg.subject,
-            source_sender=msg.sender,
-            all_day=bool(ev.get("all_day", False)),
-        )
+        norm = normalize_start(str(ev["start"]))
+        if norm is not None:          # no usable date -> nothing Calendar could take
+            start, date_only = norm
+            try:
+                confidence = float(ev.get("confidence", 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            event = EventCandidate(
+                title=str(ev["title"])[:200],
+                start=start,
+                end=normalize_end(start, str(ev.get("end", "") or "")),
+                location=str(ev.get("location", "") or "")[:200],
+                confidence=max(0.0, min(1.0, confidence)),
+                source_message_id=msg.message_id,
+                source_subject=msg.subject,
+                source_sender=msg.sender,
+                all_day=bool(ev.get("all_day", False)) or date_only,
+            )
     return Classification(category, importance,
                           str(data.get("reason", ""))[:200], event, used_llm=True)
 
 
-def classify_with_llm(msg: Message, cfg: ModelCfg) -> Classification | None:
+def build_feedback_block(store) -> str:
+    """Recent human corrections, formatted as few-shot examples for the
+    triage prompt. `store` is a mailsweep.store.Store, or None (e.g. in
+    tests, or callers that don't have one) -- in which case this is a
+    no-op, same as before feedback existed.
+
+    Call this ONCE per scan (not per message) and pass the resulting string
+    into classify()/classify_with_llm() -- the feedback data doesn't change
+    mid-scan, so re-querying it per ambiguous message is pure waste."""
+    if store is None:
+        return ""
+    sections = []
+
+    corrections = store.classify_corrections(limit=5)
+    if corrections:
+        lines = ["Recent corrections from the user -- do not repeat these mistakes:"]
+        for c in corrections:
+            lines.append(
+                f'- From: "{c["sender"]}"  Subject: "{c["subject"]}"\n'
+                f'  -> correct answer: category={c["correct_category"]}, '
+                f'importance={c["correct_importance"]} '
+                f'(previously misclassified as {c["predicted_category"]}/{c["predicted_importance"]})')
+        sections.append("\n".join(lines))
+
+    positive, negative = store.event_feedback_examples(limit=3)
+    if positive or negative:
+        lines = ["Recent event-detection feedback from the user:"]
+        for p in positive:
+            lines.append(
+                f'- From: "{p["source_sender"]}"  Subject: "{p["source_subject"]}"\n'
+                f'  -> WAS a real event ("{p["title"]}", {p["start"]}) -- confirmed by the user')
+        for n in negative:
+            lines.append(
+                f'- From: "{n["source_sender"]}"  Subject: "{n["source_subject"]}"\n'
+                f'  -> NOT a real event -- the user dismissed this suggestion')
+        sections.append("\n".join(lines))
+
+    fixes = store.event_time_corrections(limit=3)
+    if fixes:
+        lines = ["Recent date/time corrections from the user -- the event was real but the "
+                 "date/time extracted was wrong. Copy times exactly as written in the email; "
+                 "if no clock time is stated, give the date only:"]
+        for f in fixes:
+            lines.append(
+                f'- From: "{f["source_sender"]}"  Subject: "{f["source_subject"]}"\n'
+                f'  -> extracted {f["original_start"]}, correct was {f["start"]}')
+        sections.append("\n".join(lines))
+
+    return "\n" + "\n\n".join(sections) + "\n" if sections else ""
+
+
+def _local_tz_label() -> str:
+    now = datetime.now().astimezone()
+    off = now.strftime("%z")
+    return f"{now.tzname()} (UTC{off[:3]}:{off[3:]})"
+
+
+def _local_received(iso: str) -> str:
+    """The message's received time as local weekday + wall-clock, so relative
+    dates in the body ("this Thursday") resolve against what the recipient saw,
+    not a UTC timestamp that can land on the wrong weekday."""
+    try:
+        dt = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return iso
+        return dt.astimezone().strftime("%A %Y-%m-%d %H:%M")
+    except ValueError:
+        return iso
+
+
+def classify_with_llm(msg: Message, cfg: ModelCfg, feedback: str = "") -> Classification | None:
     prompt = _PROMPT.format(
-        today=datetime.now().strftime("%A, %Y-%m-%d"),
+        today=datetime.now().strftime("%A, %Y-%m-%d"), tz=_local_tz_label(),
         account=msg.account, sender=msg.sender, subject=msg.subject,
-        date=msg.date_received, snippet=msg.snippet[:1500],
+        date=_local_received(msg.date_received), snippet=msg.snippet[:1500],
+        feedback=feedback,
     )
     try:
         r = requests.post(f"{cfg.host}/api/generate", json={
@@ -128,11 +217,14 @@ def classify_with_llm(msg: Message, cfg: ModelCfg) -> Classification | None:
         return None
 
 
-def classify(msg: Message, cfg: ModelCfg, llm_up: bool) -> Classification:
-    """Hybrid pipeline: rules first, LLM only for the ambiguous residue."""
+def classify(msg: Message, cfg: ModelCfg, llm_up: bool, feedback: str = "") -> Classification:
+    """Hybrid pipeline: rules first, LLM only for the ambiguous residue.
+    `feedback`, if given (see build_feedback_block), is injected into the LLM
+    prompt as few-shot examples from recent `classify review`/`events
+    review` corrections."""
     verdict = rules.classify_by_rules(msg)
     if llm_up and rules.ambiguous(msg, verdict):
-        llm_verdict = classify_with_llm(msg, cfg)
+        llm_verdict = classify_with_llm(msg, cfg, feedback)
         if llm_verdict:
             return llm_verdict
     return verdict

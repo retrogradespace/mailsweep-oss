@@ -9,13 +9,14 @@ class Message:
     message_id: str
     account: str
     mailbox: str
-    sender: str          # raw sender string, e.g. 'Jane Doe <jane@example.com>'
+    sender: str          # raw sender string, e.g. 'Jamie Test <you@example.com>'
     sender_email: str    # normalized address, lowercase
     subject: str
     date_received: str   # ISO 8601
     snippet: str         # first N chars of plain-text content
     headers: dict[str, str] = field(default_factory=dict)
     mail_id: int = 0     # Mail.app's numeric message id, 0 if unknown (needed to move/trash)
+    replied_status: bool = False   # Mail.app's wasRepliedTo() -- for the "needs response" briefing
 
     @property
     def list_unsubscribe(self) -> str | None:
@@ -53,5 +54,6 @@ class Classification:
     used_llm: bool = False
 
 
-CATEGORIES = {"personal", "work", "transactional", "newsletter", "marketing", "notification"}
+CATEGORIES = {"personal", "work", "transactional", "newsletter", "marketing", "notification",
+              "spam_phishing", "junk", "trash"}
 IMPORTANCE = {"high", "normal", "low"}
