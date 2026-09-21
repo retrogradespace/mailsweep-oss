@@ -317,6 +317,27 @@ def test_noise_stats_reports_most_recent_subject_and_date(tmp_path):
     store.close()
 
 
+def test_noise_stats_excludes_sender_reviewed_without_unsubscribing(tmp_path):
+    """A sender trashed/archived/skipped in `stats --review` has no
+    unsubscribe target on file (common for 'notification' mail) and so
+    never touches unsub_queue -- mark_noise_reviewed is the only record of
+    that decision, and noise_stats must respect it or the sender reappears
+    on every future run despite having been reviewed."""
+    store = Store(tmp_path / "t.db")
+    msg = make_msg(message_id="<1@x>", subject="Reminder", sender_email="noisy@example.com")
+    store.record_message(msg, Classification("notification", "low", "test"))
+    store.commit()
+
+    assert len(store.noise_stats(days=30)) == 1
+
+    store.mark_noise_reviewed("noisy@example.com", "trash")
+    store.commit()
+
+    assert store.noise_stats(days=30) == []
+    assert len(store.noise_stats(days=30, include_actioned=True)) == 1
+    store.close()
+
+
 def test_classify_feedback_roundtrip(tmp_path):
     store = Store(tmp_path / "t.db")
     msg = make_msg(message_id="<fb1@x>")

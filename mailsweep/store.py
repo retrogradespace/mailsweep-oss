@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS classify_feedback (
     correct_category     TEXT, correct_importance TEXT,
     created_at           TEXT
 );
+CREATE TABLE IF NOT EXISTS noise_reviewed (
+    sender_email TEXT PRIMARY KEY,   -- decided in `stats --review`: trashed/junked/archived/skipped
+    action       TEXT,               -- trash | junk | archive | skip
+    reviewed_at  TEXT
+);
 CREATE TABLE IF NOT EXISTS runs (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     command           TEXT,          -- 'scan' | 'brief'
@@ -340,15 +345,18 @@ class Store:
     def noise_stats(self, days: int = 30, include_actioned: bool = False) -> list[sqlite3.Row]:
         """Per-sender noise counts, with the subject/date of their most
         recently received message (not alphabetically-max subject). By
-        default excludes senders already resolved in `unsub review` or a
-        prior `stats --review` (done/protected/skipped/approved) -- same
-        "already dealt with" exclusion unreviewed_llm_messages() applies,
-        just missing here until now. Pass include_actioned=True to see them
-        anyway."""
+        default excludes senders already resolved in `unsub review`
+        (done/protected/skipped/approved) or a prior `stats --review`
+        (noise_reviewed) -- trashing/archiving/skipping a sender in `stats
+        --review` used to leave no record at all unless you also
+        unsubscribed, so a resolved sender kept reappearing here every run.
+        Pass include_actioned=True to see them anyway."""
         exclude = "" if include_actioned else (
             """ AND NOT EXISTS (
                   SELECT 1 FROM unsub_queue u WHERE u.sender_email = messages.sender_email
-                    AND u.status IN ('done','protected','skipped','approved'))"""
+                    AND u.status IN ('done','protected','skipped','approved'))
+                AND NOT EXISTS (
+                  SELECT 1 FROM noise_reviewed nr WHERE nr.sender_email = messages.sender_email)"""
         )
         return list(self.conn.execute(
             f"""WITH noisy AS (
@@ -365,6 +373,14 @@ class Store:
                       MAX(CASE WHEN rn = 1 THEN date_received END) AS last_received
                FROM noisy
                GROUP BY sender_email ORDER BY n DESC""", (f"-{days} days",)))
+
+    def mark_noise_reviewed(self, sender_email: str, action: str) -> None:
+        self.conn.execute(
+            """INSERT INTO noise_reviewed (sender_email, action, reviewed_at)
+               VALUES (?,?,?)
+               ON CONFLICT(sender_email) DO UPDATE SET
+                 action=excluded.action, reviewed_at=excluded.reviewed_at""",
+            (sender_email, action, datetime.now().isoformat(timespec="seconds")))
 
     def category_counts(self, days: int = 7) -> dict[str, int]:
         rows = self.conn.execute(

@@ -950,7 +950,13 @@ def cmd_stats(args) -> int:
                     u_ans = _ask("  also unsubscribe from this sender now?", "yn")
                     if u_ans == "y":
                         _unsub_now(store, cfg, unsub_row)
-                store.commit()
+            # Record the decision even on "skip" -- otherwise a sender with no
+            # unsubscribe target (common for 'notification' category mail)
+            # has no way to leave this list once reviewed, and reappears on
+            # every future `stats`/digest run regardless of what you chose.
+            store.mark_noise_reviewed(
+                r["sender_email"], {"d": "trash", "j": "junk", "a": "archive", "n": "skip"}[ans])
+            store.commit()
     store.close()
     return 0
 
